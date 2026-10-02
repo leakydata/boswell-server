@@ -5,7 +5,42 @@ your own computer (with an NVIDIA GPU) does the heavy lifting — speech detecti
 transcription, speaker separation, voiceprints and sound tagging — with models far larger
 than a phone can run, and sends finished transcripts back to the phone.
 
-**Status: being built.** The plan:
+**Status: the server works; the phone side is being built.** On an RTX 4090 a 30-second
+recording takes under a second end to end:
+
+| Step | Model | Time |
+|---|---|---|
+| Who spoke when | pyannote speaker-diarization 3.1 (GPU) | ~0.27 s |
+| Words | NVIDIA Parakeet TDT 0.6B v3, full precision (GPU, onnx-asr) | ~0.18 s |
+| Voiceprints | the phone's own models: WeSpeaker ResNet34-LM or ReDimNet2-B6 (GPU) | < 0.2 s |
+| Sounds | CED-Mini (GPU) | ~0.18 s |
+
+## Running it
+
+```bash
+uv sync                          # Linux with an NVIDIA GPU (CUDA 12)
+uv run boswell-server fetch-models
+uv run boswell-server doctor     # what's in place
+uv run boswell-server            # the terminal screen: press p to pair a phone
+uv run boswell-server serve      # or headless; then `boswell-server pair` for a code
+```
+
+pyannote's diarization model is gated on Hugging Face: accept its terms and run
+`huggingface-cli login` once. [Tailscale](https://tailscale.com) on this computer and the
+phone lets the phone reach it from anywhere.
+
+## The API
+
+| | |
+|---|---|
+| `GET /v1/health` | is it up, which models |
+| `POST /v1/pair` `{code, device}` | a pairing code → this phone's key (stored here only as a hash) |
+| `POST /v1/analyze?voice_model=…` | one recording (Ogg Opus or WAV) → words, speakers with turns and voiceprints, sounds |
+
+The phone assembles its transcript from these exactly as it does from its own models, and
+matches the voiceprints against its own people.
+
+## The plan
 
 - **Private by design.** The phone reaches the server over [Tailscale](https://tailscale.com),
   a private network between your own devices; nothing is exposed to the internet. Each phone
