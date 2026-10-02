@@ -41,7 +41,7 @@ def health():
     import torch
     return {"name": "Boswell Server", "version": __version__,
             "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-            "voice_models": list(VOICE_MODELS), "asr": "parakeet-tdt-0.6b-v3", "diarization": "pyannote-3.1"}
+            "voice_models": list(VOICE_MODELS), "asr": "parakeet-tdt-0.6b-v3", "diarization": "pyannote-community-1"}
 
 
 @app.post("/v1/pair")

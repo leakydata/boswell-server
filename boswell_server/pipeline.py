@@ -6,7 +6,7 @@ models would have produced, from bigger ones:
 
   speech    seconds anyone speaks (pyannote); under SPEECH_MIN_S the rest is skipped
   words     [{text, start, end}] -- Parakeet TDT 0.6B v3, full precision on the GPU
-  speakers  [{index, turns: [{start, end}], seconds, voiceprint}] -- pyannote 3.1 on
+  speakers  [{index, turns: [{start, end}], seconds, voiceprint}] -- pyannote community-1 on
             the GPU; speakers numbered by first turn, as the phone's Diarizer does;
             voiceprints in the model the phone asked for (VOICE_MODELS), on the GPU
   sounds    [{label, score, at}] -- CED-Mini, windowed exactly as the phone's SoundTagger
@@ -125,7 +125,9 @@ class Engine:
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
             import torch
             from pyannote.audio import Pipeline
-            p = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
+            # community-1 over 3.1, measured on stitched Omi conversations (tools/diar_bench.py): DER 31.1% vs
+            # 36.1%, the right number of speakers in 53 of 80 vs 38, at the same speed. CC-BY-4.0.
+            p = Pipeline.from_pretrained("pyannote/speaker-diarization-community-1")
             p.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
             self._diar = p
         return self._diar
@@ -238,7 +240,7 @@ class Engine:
             sounds = self.tag(audio)
             if speech <= SPEECH_MIN_S:
                 return {"speech": round(speech, 3), "words": [], "speakers": [], "sounds": sounds,
-                        "engine": "pyannote-3.1 (home) + ced-mini", "ms": int((time.time() - t0) * 1000)}
+                        "engine": "pyannote-community-1 (home) + ced-mini", "ms": int((time.time() - t0) * 1000)}
             words = self.transcribe(audio)
             out = []
             for i, turns in enumerate(speakers):
@@ -250,5 +252,5 @@ class Engine:
                 out.append({"index": i, "turns": [{"start": round(s, 3), "end": round(e, 3)} for s, e in turns],
                             "seconds": round(secs, 3), "voiceprint": vp})
         return {"speech": round(speech, 3), "words": words, "speakers": out, "sounds": sounds,
-                "engine": f"parakeet-tdt-0.6b-v3 (home) + pyannote-3.1 (home) + {voice_model} + ced-mini",
+                "engine": f"parakeet-tdt-0.6b-v3 (home) + pyannote-community-1 (home) + {voice_model} + ced-mini",
                 "voice_model": voice_model, "ms": int((time.time() - t0) * 1000)}
