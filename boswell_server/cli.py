@@ -81,7 +81,12 @@ def main():
         print(f"Boswell Server on {base_url()}", flush=True)
         uvicorn.run(api.app, host=a.host, port=PORT, log_level="info")
     else:
+        from . import api
         from .tui import ServerApp
+        # The tagging helper is a separate process; start it before the screen takes over
+        # this terminal's file descriptors (spawning afterwards fails: "bad value(s) in fds_to_keep").
+        print("starting…", flush=True)
+        api.engine.speech()
         ServerApp(a.host).run()
 
 
