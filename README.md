@@ -8,12 +8,29 @@ than a phone can run, and sends finished transcripts back to the phone.
 **Status: the server works; the phone side is being built.** On an RTX 4090 a 30-second
 recording takes under a second end to end:
 
+
 | Step | Model | Time |
 |---|---|---|
-| Who spoke when | pyannote speaker-diarization 3.1 (GPU) | ~0.27 s |
-| Words | NVIDIA Parakeet TDT 0.6B v3, full precision (GPU, onnx-asr) | ~0.18 s |
-| Voiceprints | the phone's own models: WeSpeaker ResNet34-LM or ReDimNet2-B6 (GPU) | < 0.2 s |
+| Who spoke when | pyannote speaker-diarization **community-1** (GPU) | ~0.2 s |
+| Words | NVIDIA **Parakeet TDT 0.6B v3**, full precision (GPU, onnx-asr) | ~0.17 s |
+| Voiceprints | the phone's own models: WeSpeaker ResNet34-LM or **ReDimNet2-B6** (GPU) | < 0.2 s |
 | Sounds | CED-Mini (GPU) | ~0.18 s |
+
+## Why these models
+
+Each was chosen by measuring the candidates on the owner's own Omi recordings
+(scripts in `tools/`), not by leaderboard:
+
+| Job | Kept | Measured against | Result |
+|---|---|---|---|
+| Words | Parakeet TDT 0.6B v3 | Parakeet v2, Canary 1B v2, Whisper large-v3, the phone's Nemotron | 12.5% words wrong on the owner's corrected lines, vs 15.0–19.4% (`asr_lines.py`) |
+| Who spoke when | community-1 | pyannote 3.1 | 31.1% vs 36.1% diarization error, right speaker count 53/80 vs 38/80, on conversations stitched from named speakers (`diar_bench.py`) |
+| Voiceprints | ReDimNet2-B6 | WeSpeaker ResNet34-LM, w2v-BERT 2.0 | right person for 92.3% of hand-named voices vs 82.1% and 76.9% (`voice_bench.py`) |
+| Speech or not | pyannote segmentation | Silero VAD v5 | 385/400 recordings right vs 358/400, 37 vs 484 ms (`vad_bench.py`) |
+
+Published scores didn't always carry over: w2v-BERT 2.0 has the best published
+speaker-verification result (VoxCeleb1-O 0.14%), and was the weakest of the three
+on the owner's recordings.
 
 ## Running it
 
