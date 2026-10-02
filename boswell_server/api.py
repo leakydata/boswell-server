@@ -56,7 +56,7 @@ def pair(body: dict = Body(...)):
 
 @app.post("/v1/analyze")
 async def analyze(request: Request, voice_model: str = "wespeaker-resnet34-lm", clip: str = "",
-                  authorization: str | None = Header(None)):
+                  authorization: str | None = Header(None), x_boswell_hotwords: str | None = Header(None)):
     phone = _key(authorization)
     if voice_model not in VOICE_MODELS:
         raise HTTPException(400, f"unknown voice model {voice_model}")
@@ -68,7 +68,13 @@ async def analyze(request: Request, voice_model: str = "wespeaker-resnet34-lm", 
         audio = await run_in_threadpool(decode, data)
     except Exception as e:
         raise HTTPException(400, f"couldn't read the audio: {e}")
-    result = await run_in_threadpool(engine.analyze, audio, voice_model)
+    # The phone's "words Boswell should know" (names, its owner's terms), boosted while decoding.
+    try:
+        import json
+        hotwords = tuple(str(w) for w in json.loads(x_boswell_hotwords)) if x_boswell_hotwords else ()
+    except Exception:
+        hotwords = ()
+    result = await run_in_threadpool(engine.analyze, audio, voice_model, hotwords)
     secs = len(audio) / 16_000
     recent.append({"at": time.time(), "phone": phone["device"], "clip": clip, "seconds": round(secs, 1),
                    "ms": int((time.time() - t0) * 1000), "words": len(result["words"]), "speakers": len(result["speakers"])})

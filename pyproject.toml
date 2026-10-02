@@ -19,7 +19,7 @@ dependencies = [
     "httpx>=0.28",
     "soundfile>=0.14.0",
     "sherpa-onnx",
-    "onnx-asr[hub]>=0.12.0",
+    "nemo-toolkit[asr]>=2.5",
 ]
 
 [project.scripts]

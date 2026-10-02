@@ -31,3 +31,12 @@ def test_a_code_works_once(fresh):
 def test_keys_are_stored_hashed(fresh):
     token = fresh.pair(fresh.new_code(), "Pixel")
     assert token not in fresh.TOKENS.read_text()
+
+
+def test_hot_words_include_the_spellings_parakeet_uses():
+    from boswell_server.pipeline import boost_phrases
+    p = boost_phrases(["OpenRouter", "Lindsey", "  Omi  ", ""])
+    assert {"OpenRouter", "open router", "Open Router", "openrouter", "Lindsey", "lindsey", "Omi", "omi"} <= set(p)
+    assert "" not in p
+    assert boost_phrases(["b", "a"]) == boost_phrases(["a", "b"])   # stable: the boosting tree is rebuilt only on change
+

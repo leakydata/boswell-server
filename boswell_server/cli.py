@@ -33,10 +33,9 @@ def fetch_models():
             t.extractall(MODELS, filter="data")
         (MODELS / top).rename(MODELS / folder)
         arc.unlink()
-    if not (MODELS / "parakeet-v3-fp32" / "encoder-model.onnx").exists():
-        from huggingface_hub import snapshot_download
-        print("  parakeet-tdt-0.6b-v3 (full precision) …", flush=True)
-        snapshot_download("istupakov/parakeet-tdt-0.6b-v3-onnx", local_dir=MODELS / "parakeet-v3-fp32")
+    from huggingface_hub import snapshot_download
+    print("  nvidia/parakeet-tdt-0.6b-v3 (NeMo) …", flush=True)
+    snapshot_download("nvidia/parakeet-tdt-0.6b-v3")
     print("pyannote/speaker-diarization-3.1 comes from Hugging Face's cache; if it isn't there, accept its terms on "
           "huggingface.co and run `huggingface-cli login` once.")
     print("done")
@@ -49,7 +48,10 @@ def doctor():
     print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none (everything will run on the CPU)")
     print("Tailscale:", tailscale_name() or "off -- the phone can only reach this computer on the same network")
     print("Address:", base_url())
-    for p in ["voiceprint.onnx", "speaker-id-redimnet2-b6.onnx", "parakeet-v3-fp32/encoder-model.onnx", "ced-mini/model.onnx"]:
+    from huggingface_hub import try_to_load_from_cache
+    nemo = try_to_load_from_cache("nvidia/parakeet-tdt-0.6b-v3", "parakeet-tdt-0.6b-v3.nemo")
+    print(f"  {'ok     ' if isinstance(nemo, str) else 'MISSING'} nvidia/parakeet-tdt-0.6b-v3 (Hugging Face cache)")
+    for p in ["voiceprint.onnx", "speaker-id-redimnet2-b6.onnx", "ced-mini/model.onnx"]:
         print(f"  {'ok     ' if (MODELS / p).exists() else 'MISSING'} {p}")
 
 

@@ -27,6 +27,33 @@ MIN_VOICEPRINT_S = 0.8      # Diarizer.MIN_VOICEPRINT_S
 WINDOW_S, HOP_S, WINDOW_MIN, WINDOW_KEEP, WHOLE_KEEP, FLOOR, KEEP = 10.0, 5.0, 0.25, 0.35, 0.20, 0.02, 10
 
 
+BOOST_ALPHA = 0.5
+MAX_HOTWORDS = 300
+
+
+def _cuda() -> bool:
+    import torch
+    return torch.cuda.is_available()
+
+
+def boost_phrases(terms) -> tuple:
+    """The phone's words, as Parakeet might write them: as given, lowercase, and run-together
+    names split ("OpenRouter" -> "open router"). Boosting matches the model's own spelling and
+    spacing exactly, so a variant it might use has to be listed (measured: "open router" wasn't
+    changed by boosting "OpenRouter" alone)."""
+    import re
+    out = []
+    for t in list(terms)[:MAX_HOTWORDS]:
+        t = " ".join(str(t).split())
+        if not t or len(t) > 60:
+            continue
+        split = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", t)
+        for v in (t, t.lower(), split, split.lower()):
+            if v not in out:
+                out.append(v)
+    return tuple(sorted(out))
+
+
 def words_from_tokens(tokens, timestamps, audio_seconds, max_word=1.0):
     """Words.fromTokens: a token starting with a space starts a word; a word ends at
     the next word's start, capped so one before a silence doesn't swallow it."""
@@ -58,11 +85,15 @@ def _speech_main(conn, provider, threads):
     refuses to start once PyTorch or onnxruntime-gpu (1.30) is loaded in the
     same process -- and the main process needs both for pyannote and voiceprints.
     """
-    import sherpa_onnx
-    c = MODELS / "ced-mini"
-    tagger = sherpa_onnx.AudioTagging(sherpa_onnx.AudioTaggingConfig(
-        model=sherpa_onnx.AudioTaggingModelConfig(ced=str(c / "model.onnx"), num_threads=2, provider=provider),
-        labels=str(c / "class_labels_indices.csv"), top_k=20))
+    try:
+        import sherpa_onnx
+        c = MODELS / "ced-mini"
+        tagger = sherpa_onnx.AudioTagging(sherpa_onnx.AudioTaggingConfig(
+            model=sherpa_onnx.AudioTaggingModelConfig(ced=str(c / "model.onnx"), num_threads=2, provider=provider),
+            labels=str(c / "class_labels_indices.csv"), top_k=20))
+    except Exception as e:
+        conn.send(("error", repr(e)))   # say so, rather than leave the server waiting
+        return
     conn.send(("ready", None))
     while True:
         msg = conn.recv()
@@ -97,9 +128,13 @@ class SpeechHelper:
         self.conn, child = ctx.Pipe()
         self.proc = ctx.Process(target=_speech_main, args=(child, provider, threads), daemon=True)
         self.proc.start()
-        kind, _ = self.conn.recv()
+        # A helper that dies without a word would leave this waiting forever.
+        if not self.conn.poll(120):
+            self.proc.kill()
+            raise RuntimeError("the sound-tagging helper didn't start within two minutes")
+        kind, msg = self.conn.recv()
         if kind != "ready":
-            raise RuntimeError("speech helper didn't start")
+            raise RuntimeError(f"the sound-tagging helper didn't start: {msg}")
 
     def ask(self, kind, audio):
         self.conn.send((kind, np.ascontiguousarray(audio, dtype=np.float32)))
@@ -139,17 +174,40 @@ class Engine:
         return self._helper
 
     def asr(self):
-        """Parakeet TDT 0.6B v3, full precision on the GPU (onnx-asr): ~0.17 s per 30 s clip on a 4090."""
+        """Parakeet TDT 0.6B v3 through NVIDIA NeMo on the GPU (~0.1 s per 30 s clip on a 4090), so it can
+        boost the phone's own words while decoding (GPU phrase boosting)."""
         if self._asr is None:
-            import onnx_asr
-            import onnxruntime as ort
-            try:
-                ort.preload_dlls()
-            except Exception:
-                pass
-            self._asr = onnx_asr.load_model("nemo-parakeet-tdt-0.6b-v3", str(MODELS / "parakeet-v3-fp32"),
-                                            providers=["CUDAExecutionProvider", "CPUExecutionProvider"]).with_timestamps()
+            import logging
+            import nemo.collections.asr as nemo_asr
+            from nemo.utils import logging as nemo_logging
+            nemo_logging.setLevel(logging.ERROR)
+            m = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v3")
+            self._asr = m.cuda().eval() if _cuda() else m.eval()
+            self._boost(())
         return self._asr
+
+    _boosted: tuple | None = None
+
+    def _boost(self, phrases: tuple):
+        """Set the words to boost (empty: none). Rebuilding the boosting tree takes ~0.07 s, so only on change."""
+        if phrases == self._boosted:
+            return
+        import copy
+        from omegaconf import open_dict
+        m = self._asr
+        cfg = copy.deepcopy(m.cfg.decoding)
+        with open_dict(cfg):
+            cfg.strategy = "greedy_batch"
+            if phrases:
+                # alpha 0.5: measured on Omi recordings, names came out right more often ("Lindsay" ->
+                # "Lindsey", 3 -> 10 of 10) with no insertions of boosted words where none were said.
+                cfg.greedy.boosting_tree = {"key_phrases_list": list(phrases), "context_score": 1.0, "depth_scaling": 2.0}
+                cfg.greedy.boosting_tree_alpha = BOOST_ALPHA
+            else:
+                cfg.greedy.pop("boosting_tree", None)
+                cfg.greedy.boosting_tree_alpha = 0.0
+        m.change_decoding_strategy(cfg, verbose=False)
+        self._boosted = phrases
 
     def voiceprinter(self, model_id: str):
         if model_id not in self._vp:
@@ -181,9 +239,12 @@ class Engine:
         ordered = sorted(by.values(), key=lambda turns: turns[0][0])
         return [sorted(t) for t in ordered]
 
-    def transcribe(self, audio):
-        r = self.asr().recognize(audio, sample_rate=SR)
-        return words_from_tokens(list(r.tokens or []), list(r.timestamps or []), len(audio) / SR)
+    def transcribe(self, audio, hotwords=()):
+        m = self.asr()
+        self._boost(boost_phrases(hotwords))
+        h = m.transcribe([audio], timestamps=True, verbose=False, batch_size=1)[0]
+        return [{"text": w["word"], "start": round(float(w["start"]), 3), "end": round(float(w["end"]), 3)}
+                for w in (h.timestamp or {}).get("word", []) if w.get("word", "").strip()]
 
     def voiceprint(self, audio, model_id):
         spec = VOICE_MODELS[model_id]
@@ -230,7 +291,7 @@ class Engine:
 
     # ------------------------------------------------------------ the whole thing
 
-    def analyze(self, audio: np.ndarray, voice_model: str = "wespeaker-resnet34-lm") -> dict:
+    def analyze(self, audio: np.ndarray, voice_model: str = "wespeaker-resnet34-lm", hotwords=()) -> dict:
         if voice_model not in VOICE_MODELS:
             raise ValueError(f"unknown voice model {voice_model}")
         t0 = time.time()
@@ -241,7 +302,7 @@ class Engine:
             if speech <= SPEECH_MIN_S:
                 return {"speech": round(speech, 3), "words": [], "speakers": [], "sounds": sounds,
                         "engine": "pyannote-community-1 (home) + ced-mini", "ms": int((time.time() - t0) * 1000)}
-            words = self.transcribe(audio)
+            words = self.transcribe(audio, hotwords)
             out = []
             for i, turns in enumerate(speakers):
                 secs = sum(e - s for s, e in turns)
@@ -252,5 +313,5 @@ class Engine:
                 out.append({"index": i, "turns": [{"start": round(s, 3), "end": round(e, 3)} for s, e in turns],
                             "seconds": round(secs, 3), "voiceprint": vp})
         return {"speech": round(speech, 3), "words": words, "speakers": out, "sounds": sounds,
-                "engine": f"parakeet-tdt-0.6b-v3 (home) + pyannote-community-1 (home) + {voice_model} + ced-mini",
+                "engine": f"parakeet-tdt-0.6b-v3 (home{', ' + str(len(hotwords)) + ' hot words' if hotwords else ''}) + pyannote-community-1 (home) + {voice_model} + ced-mini",
                 "voice_model": voice_model, "ms": int((time.time() - t0) * 1000)}

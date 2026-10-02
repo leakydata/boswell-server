@@ -7,7 +7,7 @@ from pathlib import Path
 
 PORT = int(os.environ.get("BOSWELL_PORT", "8765"))
 DATA = Path(os.environ.get("BOSWELL_SERVER_DATA", Path.home() / ".local" / "share" / "boswell-server"))
-MODELS = DATA / "models"
+MODELS = Path(os.environ.get("BOSWELL_SERVER_MODELS", DATA / "models"))
 TOKENS = DATA / "phones.json"
 SR = 16_000
 
