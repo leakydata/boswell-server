@@ -5,7 +5,7 @@ The same test as boswell_phone/tools/calibrate_voice.py: hand-named voices and a
 of automatically matched ones, at most 8 s of each speaker's speech, scored by EER and by
 picking the right person (best voiceprint per person, as Boswell matches).
 
-    uv run --with transformers --with peft python tools/voice_bench.py
+    uv run --with transformers --with peft --with silero-vad python tools/voice_bench.py   (ONLY=w2v to run one)
 """
 import os
 import sys
@@ -69,7 +69,10 @@ def main():
         "ReDimNet2-B6 (phone, better)": lambda: onnx(os.path.join(MODELS, "speaker-id-redimnet2-b6.onnx"), "waveform"),
         "w2v-BERT 2.0 MFA (GPU only)": w2vbert,
     }
+    only = os.environ.get("ONLY")
     for name, make in models.items():
+        if only and only not in name:
+            continue
         embed = make()
         t = time.time()
         E = [embed(s["full"]) for s in samples]
