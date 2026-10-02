@@ -1,0 +1,10 @@
+# Models are downloaded, never committed; personal data stays out by default.
+models/
+data/
+*.wav
+*.ogg
+*.onnx
+*.pt
+.venv/
+__pycache__/
+.env
