@@ -3,6 +3,7 @@
   GET  /v1/health                  no key: is it up, what can it do
   POST /v1/pair    {code, device}  a pairing code -> this phone's key
   POST /v1/analyze ?voice_model=…  (key) one recording's audio -> its ingredients
+  GET  /v1/local/status            this computer only: what the terminal screen shows
 """
 import collections
 import time
@@ -19,13 +20,49 @@ engine = Engine()
 # What the terminal screen shows: the latest jobs, and anything worth a line in its log.
 recent: collections.deque = collections.deque(maxlen=200)
 log: collections.deque = collections.deque(maxlen=500)
+state = {"ready": "loading models…"}
+echo = False   # headless (`serve`): log lines go to stdout too, so the journal has them
 
 
 def note(msg: str):
     log.append((time.time(), msg))
+    if echo:
+        print(msg, flush=True)
+
+
+def warm():
+    """Load every model, and say how it went."""
+    t = time.time()
+    try:
+        engine.warm(("wespeaker-resnet34-lm", "redimnet2-b6-vb2vox2-lm"))
+        state["ready"] = f"ready (models loaded in {time.time() - t:.0f} s)"
+    except Exception as e:
+        state["ready"] = f"[red]models failed: {e}[/red]"
+    note(state["ready"])
+
+
+def gpu() -> str:
+    """The biggest NVIDIA GPU: name, how busy, memory used."""
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        best = None
+        for i in range(pynvml.nvmlDeviceGetCount()):
+            h = pynvml.nvmlDeviceGetHandleByIndex(i)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+            if best is None or mem.total > best[1].total:
+                best = (h, mem)
+        h, mem = best
+        util = pynvml.nvmlDeviceGetUtilizationRates(h).gpu
+        name = pynvml.nvmlDeviceGetName(h)
+        return f"{name} · {util}% busy · {mem.used / 2**30:.1f} of {mem.total / 2**30:.0f} GB"
+    except Exception:
+        return "no NVIDIA GPU found"
 
 
 app = FastAPI(title="Boswell Server", version=__version__)
+from .llm import router as llm_router  # noqa: E402  (AI on this computer: Ollama behind /v1/chat/completions)
+app.include_router(llm_router)
 
 
 def _key(authorization: str | None) -> dict:
@@ -42,6 +79,32 @@ def health():
     return {"name": "Boswell Server", "version": __version__,
             "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
             "voice_models": list(VOICE_MODELS), "asr": "parakeet-tdt-0.6b-v3", "diarization": "pyannote-community-1"}
+
+
+LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+PROXY_HEADERS = ("forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip", "via")
+
+
+def from_this_computer(request: Request) -> bool:
+    """Asked directly on this computer: a loopback client, addressed to localhost, and not through a
+    proxy. A proxy here (`tailscale serve`) connects from 127.0.0.1 too, but adds forwarding headers
+    (and Tailscale-User-*) and keeps the outside Host."""
+    if request.client is None or request.client.host not in LOOPBACK:
+        return False
+    host = request.headers.get("host", "").rsplit(":", 1)[0].strip("[]").lower()
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return False
+    return not any(k.lower() in PROXY_HEADERS or k.lower().startswith("tailscale-") for k in request.headers.keys())
+
+
+@app.get("/v1/local/status")
+def local_status(request: Request):
+    """For a terminal screen on this computer showing a server already running (the service).
+    Recordings' names and phones' names are private, so nothing proxied or remote gets them."""
+    if not from_this_computer(request):
+        raise HTTPException(403, "only from this computer")
+    return {"name": "Boswell Server", "version": __version__, "ready": state["ready"], "gpu": gpu(),
+            "recent": list(recent), "log": list(log)}
 
 
 @app.post("/v1/pair")

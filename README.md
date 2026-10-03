@@ -42,9 +42,63 @@ uv run boswell-server            # the terminal screen: press p to pair a phone
 uv run boswell-server serve      # or headless; then `boswell-server pair` for a code
 ```
 
+### In the background
+
+```bash
+uv run boswell-server install-service     # a systemd user service: starts now, and at every boot
+uv run boswell-server uninstall-service   # stops it and removes it
+```
+
+`install-service` writes `~/.config/systemd/user/boswell-server.service` (this checkout's
+`.venv/bin/boswell-server serve`), enables and starts it, and turns on lingering
+(`loginctl enable-linger`) so it runs from boot without anyone logging in. `BOSWELL_PORT`,
+`BOSWELL_SERVER_DATA` and `BOSWELL_SERVER_MODELS`, if set, go into the unit. If the port is
+already taken (say, by a server in a terminal), it's enabled but not started: stop the other one,
+then `systemctl --user start boswell-server`. Its log: `journalctl --user -u boswell-server -f`.
+`doctor` says whether it's installed and running.
+
+### The screen
+
+`boswell-server` with nothing running loads the models and runs the server itself; quitting
+stops it. With the service (or another server) already on the port, it **attaches** instead: it
+loads nothing and shows the running server's models, GPU, recordings and log (from
+`GET /v1/local/status`, answered only to this computer, never through a proxy). Pairing (`p`)
+and forgetting a phone (`f`) work the same way; `c` clears the recordings list and the log on
+this screen only; `q` closes the screen and leaves the server running.
+
 pyannote's diarization model is gated on Hugging Face: accept its terms and run
 `huggingface-cli login` once. [Tailscale](https://tailscale.com) on this computer and the
 phone lets the phone reach it from anywhere.
+
+### HTTPS
+
+```bash
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8765
+```
+
+With HTTPS certificates turned on for the tailnet (admin console → DNS), Tailscale passes the
+server on at `https://<this computer>.<tailnet>.ts.net` with a real certificate. The server
+notices, and its pairing code gives the phone that address; a phone paired over plain HTTP
+moves to it by itself.
+
+### AI on this computer
+
+The phone's assistant (questions, titles and summaries, briefs, the listening watcher) can run
+here instead of on OpenRouter: Device → Assistant → Where the AI runs → Home server. The server
+passes those requests to [Ollama](https://ollama.com) (`POST /v1/chat/completions`, the same
+format OpenRouter speaks), free, and nothing leaves the house. Web searches still go to
+OpenRouter. Measured beside the speech models on a 24 GB RTX 4090:
+
+| Model | On the GPU | Per tool call | Right tool calls | Titles as JSON |
+|---|---|---|---|---|
+| **gemma4:e4b**, thinking off (default) | all, about 5 GB | 0.2–2 s | 15/15 | 6/6 |
+| gemma4:e4b, thinking on | all | 1–4 s | 14/15 | 0/6 (thinking used up the answer) |
+| gpt-oss:20b | 24% | 4–12 s | 10/10 | 4/4 |
+| qwen3.6:27b | 28% | 24–98 s | 3/3 | |
+
+Settings: `BOSWELL_LLM_MODEL` (default `gemma4:e4b`), `BOSWELL_LLM_THINK` (`none`),
+`BOSWELL_LLM_KEEP_ALIVE` (how long the model stays loaded after an answer, `10m`),
+`BOSWELL_OLLAMA` (`http://127.0.0.1:11434`).
 
 ## The API
 
@@ -53,6 +107,9 @@ phone lets the phone reach it from anywhere.
 | `GET /v1/health` | is it up, which models |
 | `POST /v1/pair` `{code, device}` | a pairing code → this phone's key (stored here only as a hash) |
 | `POST /v1/analyze?voice_model=…` | one recording (Ogg Opus or WAV) → words, speakers with turns and voiceprints, sounds |
+| `POST /v1/chat/completions` | the assistant's AI, answered by Ollama here (OpenAI format, with tools) |
+| `GET /v1/llm` | is the local AI available, which model |
+| `GET /v1/local/status` | this computer only: what the screen shows (models, GPU, recent recordings, log) |
 
 The phone assembles its transcript from these exactly as it does from its own models, and
 matches the voiceprints against its own people.

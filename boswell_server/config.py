@@ -43,5 +43,22 @@ def tailscale_name() -> str | None:
         return None
 
 
+def https_url() -> str | None:
+    """https://<name> when `tailscale serve` passes this server on over HTTPS (with a real
+    certificate), so the phone needs no exception for plain HTTP."""
+    if not shutil.which("tailscale"):
+        return None
+    try:
+        out = subprocess.run(["tailscale", "serve", "status", "--json"], capture_output=True, text=True, timeout=5).stdout
+        for host, web in (json.loads(out or "{}").get("Web") or {}).items():
+            name, _, port = host.rpartition(":")
+            proxy = ((web.get("Handlers") or {}).get("/") or {}).get("Proxy", "")
+            if proxy.rstrip("/").endswith(f":{PORT}") and proxy.split("://")[-1].split(":")[0] in ("127.0.0.1", "localhost"):
+                return f"https://{name}" + ("" if port == "443" else f":{port}")
+    except Exception:
+        pass
+    return None
+
+
 def base_url() -> str:
-    return f"http://{tailscale_name() or 'localhost'}:{PORT}"
+    return https_url() or f"http://{tailscale_name() or 'localhost'}:{PORT}"

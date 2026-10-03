@@ -1,4 +1,4 @@
-"""boswell-server [screen | serve | pair | fetch-models | doctor]"""
+"""boswell-server [screen | serve | pair | install-service | uninstall-service | fetch-models | doctor]"""
 import argparse
 import json
 import sys
@@ -53,6 +53,11 @@ def doctor():
     print(f"  {'ok     ' if isinstance(nemo, str) else 'MISSING'} nvidia/parakeet-tdt-0.6b-v3 (Hugging Face cache)")
     for p in ["voiceprint.onnx", "speaker-id-redimnet2-b6.onnx", "ced-mini/model.onnx"]:
         print(f"  {'ok     ' if (MODELS / p).exists() else 'MISSING'} {p}")
+    from . import service
+    from .local import running
+    print(f"Service: {service.state()}")
+    print(f"Port {PORT}:", {"boswell": "Boswell Server is running", "other": "in use by another program",
+                            None: "free (no server running)"}[running()])
 
 
 def pair():
@@ -66,22 +71,47 @@ def pair():
 
 def main():
     ap = argparse.ArgumentParser(prog="boswell-server", description="Home processing server for Boswell Phone")
-    ap.add_argument("command", nargs="?", default="screen", choices=["screen", "serve", "pair", "fetch-models", "doctor"])
+    ap.add_argument("command", nargs="?", default="screen",
+                    choices=["screen", "serve", "pair", "install-service", "uninstall-service", "fetch-models", "doctor"])
     ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--unit", default="boswell-server", help=argparse.SUPPRESS)   # another unit name, for testing
     a = ap.parse_args()
-    if a.command == "fetch-models":
+    if a.command in ("serve", "screen"):
+        from .local import running
+        busy = running()
+        if busy == "other":
+            sys.exit(f"Port {PORT} is in use by another program; set BOSWELL_PORT to use a different one.")
+        if busy == "boswell" and a.command == "serve":
+            sys.exit(f"Boswell Server is already running on port {PORT}. `boswell-server` shows it.")
+    if a.command == "install-service":
+        from . import service
+        service.install(a.host, a.unit)
+    elif a.command == "uninstall-service":
+        from . import service
+        service.uninstall(a.unit)
+    elif a.command == "fetch-models":
         fetch_models()
     elif a.command == "doctor":
         doctor()
     elif a.command == "pair":
         pair()
     elif a.command == "serve":
+        import logging
         import threading
         import uvicorn
         from . import api
-        threading.Thread(target=api.engine.warm, args=(("wespeaker-resnet34-lm", "redimnet2-b6-vb2vox2-lm"),), daemon=True).start()
+        api.echo = True
+        threading.Thread(target=api.warm, daemon=True).start()
         print(f"Boswell Server on {base_url()}", flush=True)
-        uvicorn.run(api.app, host=a.host, port=PORT, log_level="info")
+        config = uvicorn.Config(api.app, host=a.host, port=PORT, log_level="info")
+        # An open screen asks for the status every two seconds; that's not news for the log.
+        logging.getLogger("uvicorn.access").addFilter(lambda r: "/v1/local/status" not in r.getMessage())
+        uvicorn.Server(config).run()
+    elif busy == "boswell":
+        # The service (or another terminal) is serving: show it, don't load a second copy of everything.
+        from .tui import ServerApp
+        ServerApp(a.host, attach=True).run()
+        print(f"Boswell Server is still running on port {PORT} (systemctl --user status boswell-server, if it's the service).")
     else:
         from . import api
         from .tui import ServerApp

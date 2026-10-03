@@ -9,7 +9,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, RichLog, Static
 
-from . import __version__, api, auth
+from . import __version__, api, auth, local
 from .config import PORT, base_url, tailscale_name
 
 
@@ -60,10 +60,13 @@ class ServerApp(App):
     """
     BINDINGS = [Binding("p", "pair", "Pair a phone"), Binding("f", "forget", "Forget selected phone"), Binding("c", "clear", "Clear the list"), Binding("q", "quit", "Quit")]
 
-    def __init__(self, host: str = "0.0.0.0"):
+    def __init__(self, host: str = "0.0.0.0", attach: bool = False):
         super().__init__()
         self.host = host
-        self.ready = "loading models…"
+        # Attached: the server runs elsewhere (the service); this only shows it, through
+        # /v1/local/status. Pairing and forgetting work as usual: they're files.
+        self.attach = attach
+        self.remote: dict | None = None
         # By time, not count: the server keeps only the latest jobs and log lines, so a
         # count stops moving once it's full and new ones would never show.
         self.shown_job = 0.0
@@ -79,11 +82,15 @@ class ServerApp(App):
         yield Footer()
 
     def on_mount(self):
-        self.sub_title = f"v{__version__} · {base_url()}"
+        self.sub_title = f"v{__version__} · {base_url()}" + (" · showing the running server" if self.attach else "")
         self.query_one("#phones", DataTable).add_columns("Phone", "Paired", "Last seen")
         self.query_one("#jobs", DataTable).add_columns("Time", "Phone", "Recording", "Audio", "Took", "Words", "Speakers")
-        threading.Thread(target=self._serve, daemon=True).start()
-        threading.Thread(target=self._warm, daemon=True).start()
+        if self.attach:
+            self.remote = local.status()
+            threading.Thread(target=self._follow, daemon=True).start()
+        else:
+            threading.Thread(target=self._serve, daemon=True).start()
+            threading.Thread(target=api.warm, daemon=True).start()
         self.set_interval(2, self.refresh_view)
         self.refresh_view()
 
@@ -91,42 +98,36 @@ class ServerApp(App):
         import uvicorn
         uvicorn.Server(uvicorn.Config(api.app, host=self.host, port=PORT, log_level="warning")).run()
 
-    def _warm(self):
-        t = time.time()
-        try:
-            api.engine.warm(("wespeaker-resnet34-lm", "redimnet2-b6-vb2vox2-lm"))
-            self.ready = f"ready (models loaded in {time.time() - t:.0f} s)"
-        except Exception as e:
-            self.ready = f"[red]models failed: {e}[/red]"
-        api.note(self.ready)
+    def _follow(self):
+        """Attached: the running server's status, every two seconds (off the screen's thread)."""
+        while True:
+            time.sleep(2)
+            self.remote = local.status()
 
-    def _gpu(self) -> str:
-        try:
-            import pynvml
-            pynvml.nvmlInit()
-            best = None
-            for i in range(pynvml.nvmlDeviceGetCount()):
-                h = pynvml.nvmlDeviceGetHandleByIndex(i)
-                mem = pynvml.nvmlDeviceGetMemoryInfo(h)
-                if best is None or mem.total > best[1].total:
-                    best = (h, mem)
-            h, mem = best
-            util = pynvml.nvmlDeviceGetUtilizationRates(h).gpu
-            name = pynvml.nvmlDeviceGetName(h)
-            return f"{name} · {util}% busy · {mem.used / 2**30:.1f} of {mem.total / 2**30:.0f} GB"
-        except Exception:
-            return "no NVIDIA GPU found"
+    def _source(self) -> tuple[str, str, list, list]:
+        """Models, GPU, jobs and log lines: this process's own, or the running server's."""
+        if not self.attach:
+            return api.state["ready"], api.gpu(), list(api.recent), list(api.log)
+        r = self.remote
+        if r is None:
+            return f"[red]the server on port {PORT} isn't answering[/red]", api.gpu(), [], []
+        if r.get("old"):
+            return "running (restart it to see its recordings and log here)", api.gpu(), [], []
+        return r["ready"], r["gpu"], r["recent"], [tuple(e) for e in r["log"]]
 
     def refresh_view(self):
-        jobs = list(api.recent)
+        ready, gpu, jobs, entries = self._source()
         last = jobs[-20:]
         avg = sum(j["ms"] for j in last) / len(last) if last else 0
         ts = tailscale_name()
+        quit_note = "q quit (the server keeps running)" if self.attach else "q quit"
         self.query_one("#status", Static).update(
-            f"[b]Models[/b]   {self.ready}\n[b]GPU[/b]      {self._gpu()}\n"
+            f"[b]Models[/b]   {ready}\n[b]GPU[/b]      {gpu}\n"
             f"[b]Address[/b]  {base_url()}" + ("" if ts else "  [yellow](Tailscale is off: only this network)[/yellow]") + "\n"
             f"[b]Today[/b]    {sum(1 for j in jobs if time.time() - j['at'] < 86400)} recordings"
-            + (f", {avg:.0f} ms each lately" if last else "") + "\n\n[dim]p pair a phone · f forget one · c clear the list · q quit[/dim]")
+            + (f", {avg:.0f} ms each lately" if last else "")
+            + ("\n[b]Server[/b]   in the background (the service); this screen only shows it" if self.attach else "\n")
+            + f"\n[dim]p pair a phone · f forget one · c clear the list · {quit_note}[/dim]")
         phones = self.query_one("#phones", DataTable)
         phones.clear()
         for p in auth.phones():
@@ -139,7 +140,6 @@ class ServerApp(App):
                               f"{j['seconds']} s", f"{j['ms']} ms", str(j["words"]), str(j["speakers"]))
                 self.shown_job = j["at"]
         log = self.query_one("#log", RichLog)
-        entries = list(api.log)
         for t, msg in entries:
             if t > self.shown_log:
                 log.write(f"[dim]{time.strftime('%H:%M:%S', time.localtime(t))}[/dim] {msg}")
@@ -160,5 +160,8 @@ class ServerApp(App):
         key = phones.coordinate_to_cell_key(phones.cursor_coordinate).row_key.value
         name = next((p["device"] for p in auth.phones() if p["hash"] == key), "a phone")
         auth.forget(key)
-        api.note(f"forgot {name}")
+        if self.attach:   # the running server's log is its own; say it here
+            self.query_one("#log", RichLog).write(f"[dim]{time.strftime('%H:%M:%S')}[/dim] forgot {name}")
+        else:
+            api.note(f"forgot {name}")
         self.refresh_view()
