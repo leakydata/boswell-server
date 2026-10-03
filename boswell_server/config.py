@@ -21,7 +21,6 @@ FILES = {
     "speaker-id-redimnet2-b6.onnx": PHONE_RELEASE + "speaker-id-redimnet2-b6.onnx",
 }
 ARCHIVES = {   # folder name -> archive (unpacked into MODELS/<folder>)
-    "parakeet-v3": SHERPA + "asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
     "ced-mini": SHERPA + "audio-tagging-models/sherpa-onnx-ced-mini-audio-tagging-2024-04-19.tar.bz2",
 }
 

@@ -36,7 +36,7 @@ def fetch_models():
     from huggingface_hub import snapshot_download
     print("  nvidia/parakeet-tdt-0.6b-v3 (NeMo) …", flush=True)
     snapshot_download("nvidia/parakeet-tdt-0.6b-v3")
-    print("pyannote/speaker-diarization-3.1 comes from Hugging Face's cache; if it isn't there, accept its terms on "
+    print("pyannote/speaker-diarization-community-1 comes from Hugging Face's cache; if it isn't there, accept its terms on "
           "huggingface.co and run `huggingface-cli login` once.")
     print("done")
 

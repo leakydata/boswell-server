@@ -58,14 +58,16 @@ class ServerApp(App):
     #pair { width: auto; height: auto; background: $surface; border: thick $accent; padding: 1 2; }
     #qr { color: black; background: white; width: auto; }
     """
-    BINDINGS = [Binding("p", "pair", "Pair a phone"), Binding("f", "forget", "Forget selected phone"), Binding("q", "quit", "Quit")]
+    BINDINGS = [Binding("p", "pair", "Pair a phone"), Binding("f", "forget", "Forget selected phone"), Binding("c", "clear", "Clear the list"), Binding("q", "quit", "Quit")]
 
     def __init__(self, host: str = "0.0.0.0"):
         super().__init__()
         self.host = host
         self.ready = "loading models…"
-        self.seen_log = 0
-        self.seen_jobs = 0
+        # By time, not count: the server keeps only the latest jobs and log lines, so a
+        # count stops moving once it's full and new ones would never show.
+        self.shown_job = 0.0
+        self.shown_log = 0.0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -124,31 +126,39 @@ class ServerApp(App):
             f"[b]Models[/b]   {self.ready}\n[b]GPU[/b]      {self._gpu()}\n"
             f"[b]Address[/b]  {base_url()}" + ("" if ts else "  [yellow](Tailscale is off: only this network)[/yellow]") + "\n"
             f"[b]Today[/b]    {sum(1 for j in jobs if time.time() - j['at'] < 86400)} recordings"
-            + (f", {avg:.0f} ms each lately" if last else "") + "\n\n[dim]p pair a phone · f forget one · q quit[/dim]")
+            + (f", {avg:.0f} ms each lately" if last else "") + "\n\n[dim]p pair a phone · f forget one · c clear the list · q quit[/dim]")
         phones = self.query_one("#phones", DataTable)
         phones.clear()
         for p in auth.phones():
             fmt = lambda t: time.strftime("%b %d %H:%M", time.localtime(t)) if t else "never"
             phones.add_row(p["device"], fmt(p["paired"]), fmt(p["last"]), key=p["hash"])
         table = self.query_one("#jobs", DataTable)
-        for j in jobs[self.seen_jobs:]:
-            table.add_row(time.strftime("%H:%M:%S", time.localtime(j["at"])), j["phone"], j["clip"] or "-",
-                          f"{j['seconds']} s", f"{j['ms']} ms", str(j["words"]), str(j["speakers"]))
-        self.seen_jobs = len(jobs)
+        for j in jobs:
+            if j["at"] > self.shown_job:
+                table.add_row(time.strftime("%H:%M:%S", time.localtime(j["at"])), j["phone"], j["clip"] or "-",
+                              f"{j['seconds']} s", f"{j['ms']} ms", str(j["words"]), str(j["speakers"]))
+                self.shown_job = j["at"]
         log = self.query_one("#log", RichLog)
         entries = list(api.log)
-        for t, msg in entries[self.seen_log:]:
-            log.write(f"[dim]{time.strftime('%H:%M:%S', time.localtime(t))}[/dim] {msg}")
-        self.seen_log = len(entries)
+        for t, msg in entries:
+            if t > self.shown_log:
+                log.write(f"[dim]{time.strftime('%H:%M:%S', time.localtime(t))}[/dim] {msg}")
+                self.shown_log = t
 
     def action_pair(self):
         self.push_screen(PairScreen())
+
+    def action_clear(self):
+        """Empty the recordings list and the log on screen; today's count and timings stay."""
+        self.query_one("#jobs", DataTable).clear()
+        self.query_one("#log", RichLog).clear()
 
     def action_forget(self):
         phones = self.query_one("#phones", DataTable)
         if phones.row_count == 0:
             return
         key = phones.coordinate_to_cell_key(phones.cursor_coordinate).row_key.value
+        name = next((p["device"] for p in auth.phones() if p["hash"] == key), "a phone")
         auth.forget(key)
-        api.note(f"forgot {key}")
+        api.note(f"forgot {name}")
         self.refresh_view()
