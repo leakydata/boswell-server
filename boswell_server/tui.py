@@ -129,7 +129,7 @@ class ServerApp(App):
         phones.clear()
         for p in auth.phones():
             fmt = lambda t: time.strftime("%b %d %H:%M", time.localtime(t)) if t else "never"
-            phones.add_row(p["device"], fmt(p["paired"]), fmt(p["last"]), key=p["device"])
+            phones.add_row(p["device"], fmt(p["paired"]), fmt(p["last"]), key=p["hash"])
         table = self.query_one("#jobs", DataTable)
         for j in jobs[self.seen_jobs:]:
             table.add_row(time.strftime("%H:%M:%S", time.localtime(j["at"])), j["phone"], j["clip"] or "-",

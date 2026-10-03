@@ -69,6 +69,8 @@ def pair(code: str, device: str) -> str | None:
             return None
         token = secrets.token_urlsafe(32)
         d = _load()
+        # Pairing again from the same phone replaces its old key, which it no longer has.
+        d["phones"] = [p for p in d["phones"] if p["device"] != (device[:80] or "phone")]
         d["phones"].append({"device": device[:80] or "phone", "hash": _hash(token), "paired": time.time(), "last": None})
         _save(d)
     return token
@@ -92,8 +94,8 @@ def phones() -> list[dict]:
     return _load()["phones"]
 
 
-def forget(device: str):
+def forget(key_hash: str):
     with _lock:
         d = _load()
-        d["phones"] = [p for p in d["phones"] if p["device"] != device]
+        d["phones"] = [p for p in d["phones"] if p["hash"] != key_hash]
         _save(d)
