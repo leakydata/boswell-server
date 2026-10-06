@@ -84,3 +84,17 @@ def test_no_pool_of_compile_workers():
     out = subprocess.run([sys.executable, "-c", "import boswell_server, os; print(os.environ['TORCHINDUCTOR_COMPILE_THREADS'])"],
                          env=env, capture_output=True, text=True).stdout
     assert out.strip() == "1"
+
+
+def test_snr_is_the_voice_over_the_recordings_noise_floor():
+    import numpy as np
+    from boswell_server.pipeline import snr_db
+    rng = np.random.default_rng(0)
+    audio = (rng.standard_normal(16000 * 10) * 0.001).astype(np.float32)         # a quiet room
+    audio[16000 * 2:16000 * 4] += (0.1 * np.sin(np.arange(32000) * 0.2)).astype(np.float32)   # someone close, 2-4 s
+    near = snr_db(audio, [(2.0, 4.0)])
+    assert 30 < near < 40                     # 0.1 sine (power 0.005) over 1e-6 noise: 37 dB
+    assert abs(snr_db(audio, [(6.0, 8.0)])) < 2           # the room itself: about 0 dB
+    assert snr_db(audio, [(2.0, 2.01)]) > 20              # shorter than a frame still counts
+    # Snr.kt's numbers for this recording, so the phone and the server agree.
+    assert round(near, 2) == round(snr_db(audio.astype(np.float64), [(2.0, 4.0)]), 2)

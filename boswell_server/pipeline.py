@@ -6,9 +6,10 @@ models would have produced, from bigger ones:
 
   speech    seconds anyone speaks (pyannote); under SPEECH_MIN_S the rest is skipped
   words     [{text, start, end}] -- Parakeet TDT 0.6B v3, full precision on the GPU
-  speakers  [{index, turns: [{start, end}], seconds, voiceprint}] -- pyannote community-1 on
+  speakers  [{index, turns: [{start, end}], seconds, voiceprint, snr_db}] -- pyannote community-1 on
             the GPU; speakers numbered by first turn, as the phone's Diarizer does;
-            voiceprints in the model the phone asked for (VOICE_MODELS), on the GPU
+            voiceprints in the model the phone asked for (VOICE_MODELS), on the GPU;
+            snr_db how far the voice stands above the recording's noise floor (snr_db)
   sounds    [{label, score, at}] -- CED-Mini, windowed exactly as the phone's SoundTagger
 
 Each step mirrors a phone function, named in its docstring.
@@ -29,6 +30,27 @@ WINDOW_S, HOP_S, WINDOW_MIN, WINDOW_KEEP, WHOLE_KEEP, FLOOR, KEEP = 10.0, 5.0, 0
 
 BOOST_ALPHA = 0.5
 MAX_HOTWORDS = 300
+
+
+SNR_FRAME, SNR_HOP = 512, 160    # Snr.kt
+
+
+def _frame_energy(x):
+    if len(x) < SNR_FRAME:
+        x = np.pad(x, (0, SNR_FRAME - len(x)))
+    k = 1 + (len(x) - SNR_FRAME) // SNR_HOP
+    idx = np.arange(SNR_FRAME)[None, :] + SNR_HOP * np.arange(k)[:, None]
+    return (x[idx] ** 2).mean(1)
+
+
+def snr_db(audio, turns):
+    """Snr.db: a voice's speech level (the loudest 70% of its turns' frames) over the
+    recording's noise floor (the 10th percentile of all its frames), in dB. The phone
+    decides on it whether a voice is near enough to trust: the owner's own voice is the near one."""
+    audio = np.asarray(audio, dtype=np.float64)
+    e = _frame_energy(np.concatenate([audio[int(s * SR):int(e * SR)] for s, e in turns]))
+    loud = e[e >= np.percentile(e, 30)]
+    return float(10 * np.log10(loud.mean() + 1e-12) - 10 * np.log10(np.percentile(_frame_energy(audio), 10) + 1e-12))
 
 
 def _cuda() -> bool:
@@ -311,7 +333,7 @@ class Engine:
                     clip = np.concatenate([audio[int(s * SR):int(e * SR)] for s, e in turns])
                     vp = self.voiceprint(clip, voice_model)
                 out.append({"index": i, "turns": [{"start": round(s, 3), "end": round(e, 3)} for s, e in turns],
-                            "seconds": round(secs, 3), "voiceprint": vp})
+                            "seconds": round(secs, 3), "voiceprint": vp, "snr_db": round(snr_db(audio, turns), 2)})
         return {"speech": round(speech, 3), "words": words, "speakers": out, "sounds": sounds,
                 "engine": f"parakeet-tdt-0.6b-v3 (home{', ' + str(len(hotwords)) + ' hot words' if hotwords else ''}) + pyannote-community-1 (home) + {voice_model} + ced-mini",
                 "voice_model": voice_model, "ms": int((time.time() - t0) * 1000)}
