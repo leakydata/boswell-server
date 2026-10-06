@@ -109,6 +109,8 @@ Settings: `BOSWELL_LLM_MODEL` (default `gemma4:e4b`), `BOSWELL_LLM_THINK` (`none
 | `POST /v1/analyze?voice_model=…` | one recording (Ogg Opus or WAV) → words, speakers with turns and voiceprints, sounds |
 | `POST /v1/chat/completions` | the assistant's AI, answered by Ollama here (OpenAI format, with tools) |
 | `GET /v1/llm` | is the local AI available, which model |
+| `POST /v1/backup` | the phone's daily backup (a zip, streamed to disk): the newest 7 per phone are kept in `~/.local/share/boswell-server/backups/` |
+| `GET /v1/backups`, `GET /v1/backups/{name}` | this phone's backups, and one of them to restore from; a phone sees only its own |
 | `GET /v1/local/status` | this computer only: what the screen shows (models, GPU, recent recordings, log) |
 
 The phone assembles its transcript from these exactly as it does from its own models, and

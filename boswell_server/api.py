@@ -3,15 +3,20 @@
   GET  /v1/health                  no key: is it up, what can it do
   POST /v1/pair    {code, device}  a pairing code -> this phone's key
   POST /v1/analyze ?voice_model=…  (key) one recording's audio -> its ingredients
+  POST /v1/backup                  (key) a backup zip from the phone, streamed to disk; the newest 7 kept
+  GET  /v1/backups                 (key) this phone's backups: name, bytes, created
+  GET  /v1/backups/{name}          (key) one of them, to restore from
   GET  /v1/local/status            this computer only: what the terminal screen shows
 """
 import collections
+import re
 import time
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
 
-from . import __version__, auth
+from . import __version__, auth, config
 from .audio import decode
 from .config import VOICE_MODELS
 from .pipeline import Engine
@@ -142,3 +147,70 @@ async def analyze(request: Request, voice_model: str = "wespeaker-resnet34-lm", 
     recent.append({"at": time.time(), "phone": phone["device"], "clip": clip, "seconds": round(secs, 1),
                    "ms": int((time.time() - t0) * 1000), "words": len(result["words"]), "speakers": len(result["speakers"])})
     return result
+
+
+KEEP_BACKUPS = 7
+BACKUP_NAME = re.compile(r"boswell-backup-\d{4}-\d{2}-\d{2}-\d{6}\.zip")
+
+
+def backups_dir(phone: dict):
+    """This phone's backup folder, named after it. Pairing again from the same phone keeps its
+    name (and gives it a new key), so its name is what stays the same."""
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", phone["device"]).strip("-")[:80] or "phone"
+    return config.DATA / "backups" / safe
+
+
+def _backups(phone: dict) -> list:
+    d = backups_dir(phone)
+    return sorted((f for f in d.glob("boswell-backup-*.zip") if BACKUP_NAME.fullmatch(f.name)), key=lambda f: f.name, reverse=True) \
+        if d.is_dir() else []
+
+
+@app.post("/v1/backup")
+async def backup(request: Request, authorization: str | None = Header(None)):
+    """The phone's whole backup (hundreds of MB), written to disk as it arrives: never all in memory."""
+    phone = _key(authorization)
+    d = backups_dir(phone)
+    d.mkdir(parents=True, exist_ok=True)
+    name = time.strftime("boswell-backup-%Y-%m-%d-%H%M%S.zip")
+    part = d / (name + ".part")
+    size = 0
+    try:
+        with open(part, "wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+                size += len(chunk)
+        if size == 0:
+            raise HTTPException(400, "no backup")
+        with open(part, "rb") as f:
+            if f.read(4) != b"PK\x03\x04":
+                raise HTTPException(400, "not a zip")
+        part.replace(d / name)
+    except BaseException as e:
+        part.unlink(missing_ok=True)
+        if not isinstance(e, HTTPException):
+            note(f"backup from {phone['device']} failed: {e}")
+        raise
+    for old in _backups(phone)[KEEP_BACKUPS:]:
+        old.unlink(missing_ok=True)
+    note(f"backup from {phone['device']}: {size / 2**20:.0f} MB")
+    return {"name": name, "bytes": size}
+
+
+@app.get("/v1/backups")
+def backups(authorization: str | None = Header(None)):
+    phone = _key(authorization)
+    found = [{"name": f.name, "bytes": (st := f.stat()).st_size, "created": st.st_mtime} for f in _backups(phone)]
+    note(f"{phone['device']} listed its backups ({len(found)})")
+    return {"backups": found}
+
+
+@app.get("/v1/backups/{name}")
+def backup_file(name: str, authorization: str | None = Header(None)):
+    phone = _key(authorization)
+    # Only a name this server gave out, in this phone's own folder: nothing else can be reached.
+    f = backups_dir(phone) / name
+    if not BACKUP_NAME.fullmatch(name) or not f.is_file():
+        raise HTTPException(404, "no such backup")
+    note(f"{phone['device']} downloaded {name}")
+    return FileResponse(f, media_type="application/zip", filename=name)

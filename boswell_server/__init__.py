@@ -1,6 +1,6 @@
 import os
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # NeMo calls torch.compile when it's imported (transformer_encoder.py), which makes PyTorch start
 # a pool of compile workers, one per core up to 32, ~380 MB each. Nothing here compiles anything,

@@ -98,3 +98,36 @@ def test_snr_is_the_voice_over_the_recordings_noise_floor():
     assert snr_db(audio, [(2.0, 2.01)]) > 20              # shorter than a frame still counts
     # Snr.kt's numbers for this recording, so the phone and the server agree.
     assert round(near, 2) == round(snr_db(audio.astype(np.float64), [(2.0, 4.0)]), 2)
+
+
+def test_backups_are_kept_per_phone_and_only_seen_by_it(fresh, monkeypatch):
+    from fastapi.testclient import TestClient
+    from boswell_server import api
+    import itertools
+    names = (f"boswell-backup-2026-10-{d:02d}-120000.zip" for d in itertools.count(1))
+    monkeypatch.setattr(api.time, "strftime", lambda fmt: next(names))
+    pixel, other = (fresh.pair(fresh.new_code(), d) for d in ("Google Pixel 8", "../Other phone"))
+    web = TestClient(api.app)
+    key = lambda t: {"Authorization": f"Bearer {t}"}
+    zip_ = b"PK\x03\x04" + b"x" * 100_000
+    assert web.post("/v1/backup", content=zip_).status_code == 401
+    assert web.post("/v1/backup", content=b"", headers=key(pixel)).status_code == 400
+    assert web.post("/v1/backup", content=b"not a zip", headers=key(pixel)).status_code == 400
+    for _ in range(9):
+        r = web.post("/v1/backup", content=iter([zip_[:10], zip_[10:]]), headers=key(pixel))   # streamed, in pieces
+        assert r.status_code == 200 and r.json()["bytes"] == len(zip_)
+    folder = fresh.TOKENS.parent / "backups" / "Google-Pixel-8"
+    # The refused two used up a name each: 3 to 11 arrived, and the newest 7 are kept, with no .part left.
+    assert sorted(f.name for f in folder.iterdir())[0] == "boswell-backup-2026-10-05-120000.zip" and len(list(folder.iterdir())) == 7
+    listed = web.get("/v1/backups", headers=key(pixel)).json()["backups"]
+    assert [b["name"] for b in listed][:2] == ["boswell-backup-2026-10-11-120000.zip", "boswell-backup-2026-10-10-120000.zip"]
+    assert len(listed) == 7 and listed[0]["bytes"] == len(zip_) and listed[0]["created"] > 0
+    got = web.get(f"/v1/backups/{listed[0]['name']}", headers=key(pixel))
+    assert got.status_code == 200 and got.content == zip_
+    # Another phone sees only its own, and no name reaches outside the folder.
+    assert web.get("/v1/backups", headers=key(other)).json()["backups"] == []
+    assert web.get(f"/v1/backups/{listed[0]['name']}", headers=key(other)).status_code == 404
+    for bad in ("..%2F..%2Fphones.json", "boswell-backup-2026-10-11-120000.zip.part", "phones.json"):
+        assert web.get(f"/v1/backups/{bad}", headers=key(pixel)).status_code == 404, bad
+    assert web.post("/v1/backup", content=zip_, headers=key(other)).status_code == 200
+    assert (folder.parent / "Other-phone").is_dir()                        # its name can't climb out either
