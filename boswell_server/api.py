@@ -3,9 +3,12 @@
   GET  /v1/health                  no key: is it up, what can it do
   POST /v1/pair    {code, device}  a pairing code -> this phone's key
   POST /v1/analyze ?voice_model=…  (key) one recording's audio -> its ingredients
-  POST /v1/backup                  (key) a backup zip from the phone, streamed to disk; the newest 7 kept
-  GET  /v1/backups                 (key) this phone's backups: name, bytes, created
-  GET  /v1/backups/{name}          (key) one of them, to restore from
+  POST /v1/backup                  (key) a whole backup zip from the phone, streamed to disk (older phones)
+  POST /v1/backup/start {files}    (key) an incremental backup: the phone's file list -> the hashes missing here
+  POST /v1/backup/blobs            (key) those files, streamed (see backups.BlobReader)
+  POST /v1/backup/finish {session} (key) the backup's manifest, written once every file is here
+  GET  /v1/backups                 (key) this phone's backups: name, bytes, created; the newest 7 kept
+  GET  /v1/backups/{name}          (key) one of them as a backup zip, to restore from
   GET  /v1/local/status            this computer only: what the terminal screen shows
 """
 import collections
@@ -14,9 +17,9 @@ import time
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
-from . import __version__, auth, config
+from . import __version__, auth, backups as store, config
 from .audio import decode
 from .config import VOICE_MODELS
 from .pipeline import Engine
@@ -83,7 +86,8 @@ def health():
     import torch
     return {"name": "Boswell Server", "version": __version__,
             "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-            "voice_models": list(VOICE_MODELS), "asr": "parakeet-tdt-0.6b-v3", "diarization": "pyannote-community-1"}
+            "voice_models": list(VOICE_MODELS), "asr": "parakeet-tdt-0.6b-v3", "diarization": "pyannote-community-1",
+            "backup": 2}   # 2: incremental backups (POST /v1/backup/start)
 
 
 LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
@@ -149,8 +153,8 @@ async def analyze(request: Request, voice_model: str = "wespeaker-resnet34-lm", 
     return result
 
 
-KEEP_BACKUPS = 7
-BACKUP_NAME = re.compile(r"boswell-backup-\d{4}-\d{2}-\d{2}-\d{6}\.zip")
+KEEP_BACKUPS = store.KEEP
+BACKUP_NAME = store.ZIP_NAME
 
 
 def backups_dir(phone: dict):
@@ -158,12 +162,6 @@ def backups_dir(phone: dict):
     name (and gives it a new key), so its name is what stays the same."""
     safe = re.sub(r"[^A-Za-z0-9_-]+", "-", phone["device"]).strip("-")[:80] or "phone"
     return config.DATA / "backups" / safe
-
-
-def _backups(phone: dict) -> list:
-    d = backups_dir(phone)
-    return sorted((f for f in d.glob("boswell-backup-*.zip") if BACKUP_NAME.fullmatch(f.name)), key=lambda f: f.name, reverse=True) \
-        if d.is_dir() else []
 
 
 @app.post("/v1/backup")
@@ -191,16 +189,70 @@ async def backup(request: Request, authorization: str | None = Header(None)):
         if not isinstance(e, HTTPException):
             note(f"backup from {phone['device']} failed: {e}")
         raise
-    for old in _backups(phone)[KEEP_BACKUPS:]:
-        old.unlink(missing_ok=True)
+    store.keep(d, KEEP_BACKUPS)
     note(f"backup from {phone['device']}: {size / 2**20:.0f} MB")
     return {"name": name, "bytes": size}
+
+
+def _refused(e: store.Refused):
+    return HTTPException(e.status, str(e))
+
+
+@app.post("/v1/backup/start")
+def backup_start(body: dict = Body(...), authorization: str | None = Header(None)):
+    """An incremental backup begins: every file the phone would put in its zip, in that order
+    (path, size, sha256). The answer is a session and the sha256s this server doesn't have."""
+    phone = _key(authorization)
+    d = backups_dir(phone)
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        r = store.start(d, body.get("files"))
+    except store.Refused as e:
+        raise _refused(e)
+    note(f"backup from {phone['device']}: {r['files']} files, {len(r['missing'])} new ({r['missing_bytes'] / 2**20:.0f} MB to send)")
+    return r
+
+
+@app.post("/v1/backup/blobs")
+async def backup_blobs(request: Request, authorization: str | None = Header(None)):
+    """Files for a backup, one after another (length, bytes, sha256), each checked and stored as it ends."""
+    phone = _key(authorization)
+    d = backups_dir(phone)
+    reader = store.BlobReader(store.blobs_dir(d))
+    store.blobs_dir(d).mkdir(parents=True, exist_ok=True)
+    try:
+        async for chunk in request.stream():
+            reader.feed(chunk)
+        reader.close()
+    except store.Refused as e:
+        reader.close_quietly()
+        note(f"backup from {phone['device']}: {e}")
+        raise _refused(e)
+    except BaseException:
+        reader.close_quietly()
+        raise
+    return {"stored": reader.stored, "received": reader.received, "bytes": reader.bytes}
+
+
+@app.post("/v1/backup/finish")
+def backup_finish(body: dict = Body(...), authorization: str | None = Header(None)):
+    """The backup is all here: write its manifest, keep the newest 7, and let go of files none lists."""
+    phone = _key(authorization)
+    d = backups_dir(phone)
+    try:
+        r = store.finish(d, body.get("session"), body.get("changed"), body.get("drop"),
+                         name=time.strftime("boswell-backup-%Y-%m-%d-%H%M%S.zip").removesuffix(".zip") + ".json")
+    except store.Refused as e:
+        note(f"backup from {phone['device']} refused: {e}")
+        raise _refused(e)
+    note(f"backup from {phone['device']}: {r['bytes'] / 2**20:.0f} MB, {r['files']} files")
+    return r
 
 
 @app.get("/v1/backups")
 def backups(authorization: str | None = Header(None)):
     phone = _key(authorization)
-    found = [{"name": f.name, "bytes": (st := f.stat()).st_size, "created": st.st_mtime} for f in _backups(phone)]
+    found = [{"name": n, "bytes": size, "created": created} for n, _, created, size in store.listing(backups_dir(phone))]
     note(f"{phone['device']} listed its backups ({len(found)})")
     return {"backups": found}
 
@@ -209,8 +261,16 @@ def backups(authorization: str | None = Header(None)):
 def backup_file(name: str, authorization: str | None = Header(None)):
     phone = _key(authorization)
     # Only a name this server gave out, in this phone's own folder: nothing else can be reached.
-    f = backups_dir(phone) / name
-    if not BACKUP_NAME.fullmatch(name) or not f.is_file():
+    d = backups_dir(phone)
+    found = {n: f for n, f, _, _ in store.listing(d)} if BACKUP_NAME.fullmatch(name) else {}
+    f = found.get(name)
+    if f is None:
         raise HTTPException(404, "no such backup")
     note(f"{phone['device']} downloaded {name}")
-    return FileResponse(f, media_type="application/zip", filename=name)
+    if f.suffix == ".zip":
+        return FileResponse(f, media_type="application/zip", filename=name)
+    # Incremental: the zip is put together from its files as it's sent.
+    m = store.manifest(f)
+    return StreamingResponse(store.zip_stream(d, m), media_type="application/zip",
+                             headers={"Content-Length": str(m["bytes"]),
+                                      "Content-Disposition": f'attachment; filename="{name}"'})

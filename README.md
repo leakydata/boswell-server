@@ -109,8 +109,16 @@ Settings: `BOSWELL_LLM_MODEL` (default `gemma4:e4b`), `BOSWELL_LLM_THINK` (`none
 | `POST /v1/analyze?voice_model=…` | one recording (Ogg Opus or WAV) → words, speakers with turns and voiceprints, sounds |
 | `POST /v1/chat/completions` | the assistant's AI, answered by Ollama here (OpenAI format, with tools) |
 | `GET /v1/llm` | is the local AI available, which model |
-| `POST /v1/backup` | the phone's daily backup (a zip, streamed to disk): the newest 7 per phone are kept in `~/.local/share/boswell-server/backups/` |
-| `GET /v1/backups`, `GET /v1/backups/{name}` | this phone's backups, and one of them to restore from; a phone sees only its own |
+| `POST /v1/backup/start` `{files}` | the phone's daily backup, incremental: its whole file list (path, size, sha256) → the files this server doesn't have yet |
+| `POST /v1/backup/blobs` | those files, streamed (each: 8-byte length, the bytes, their sha256); each is checked before it's kept |
+| `POST /v1/backup/finish` `{session}` | the backup's manifest, written once every file it lists is here |
+| `POST /v1/backup` | a whole backup zip, streamed to disk, from a phone too old for the above |
+| `GET /v1/backups`, `GET /v1/backups/{name}` | this phone's backups, and one of them as a backup zip to restore from (put together as it's sent); a phone sees only its own |
+
+Backups live in `~/.local/share/boswell-server/backups/<phone>/`: each file once in `files/<sha256>`,
+and a small manifest per backup listing its files. The newest 7 backups per phone are kept, and a
+file no kept backup lists is deleted. A day's backup sends only what changed: with real data, about
+130 MB of new recordings and rewritten transcripts instead of a 550 MB zip.
 | `GET /v1/local/status` | this computer only: what the screen shows (models, GPU, recent recordings, log) |
 
 The phone assembles its transcript from these exactly as it does from its own models, and
